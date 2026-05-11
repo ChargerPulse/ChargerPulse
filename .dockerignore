@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+*.pyo
+*.env
+.git
+.gitignore
+.env.local
+.env*.local
+README.md
+*.md
