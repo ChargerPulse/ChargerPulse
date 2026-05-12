@@ -1,9 +1,13 @@
-import ssl
+import asyncio
+import websockets
 import logging
-from datetime import datetime, timezone
-from ocpp.v16 import ChargePoint as CP, call_result
-from ocpp.routing import on
-import asyncio, websockets, asyncpg, os, json
+import asyncpg
+import json
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -11,58 +15,89 @@ logger = logging.getLogger(__name__)
 DSN = os.getenv("DATABASE_URL")
 pool = None
 
-class ChargePoint(CP):
-    @on("StatusNotification")
-    async def on_status(self, connectorId, status, **kwargs):
-        try:
-            valid_statuses = ["Available", "Preparing", "Charging", "SuspendedEVSE", "SuspendedEV", "Finishing", "Reserved", "Unavailable", "Faulted"]
-            if not isinstance(connectorId, int) or status not in valid_statuses:
-                logger.warning(f"Invalid status data: connectorId={connectorId}, status={status}")
-                return call_result.StatusNotificationPayload()
-            
-            await pool.execute(
-                "insert into events(cp_id, connector_id, status, ts) values($1, $2, $3, $4)",
-                self.id, connectorId, status, datetime.now(timezone.utc))
-            logger.info(f"CP {self.id}: Connector {connectorId} -> {status}")
-        except Exception as e:
-            logger.error(f"Error storing status: {e}")
-        
-        return call_result.StatusNotificationPayload()
+async def init_db():
+    """Initialize database connection pool"""
+    global pool
+    try:
+        pool = await asyncpg.create_pool(DSN, min_size=2, max_size=10)
+        logger.info("✅ Database pool initialized")
+    except Exception as e:
+        logger.error(f"❌ Database connection failed: {e}")
+        pool = None
+
+async def log_event(cp_id, connector_id, status):
+    """Log a charger status event to the database"""
+    logger.info(f"🔍 log_event called: cp_id={cp_id}, connector_id={connector_id}, status={status}")
+    
+    if not pool:
+        logger.warning("❌ Database pool not available, skipping log")
+        return
+    
+    try:
+        async with pool.acquire() as conn:
+                        await conn.execute(
+                r"""
+                INSERT INTO events (cp_id, connector_id, status)
+                VALUES (\$1, \$2, \$3)
+                """,
+                cp_id, connector_id, status
+            )
+        logger.info(f"✅ Logged: {cp_id} (connector {connector_id}) = {status}")
+    except Exception as e:
+        logger.error(f"❌ Failed to log event: {e}")
 
 async def main(websocket, path):
-    cp = ChargePoint(websocket.path.split('/')[-1], websocket)
-    await cp.start()
+    """Handle incoming OCPP WebSocket connections"""
+    client_id = path.split('/')[-1]
+    logger.info(f"📡 Client connected: {client_id}")
+    
+    try:
+        async for message in websocket:
+            logger.info(f"[{client_id}] Received: {message}")
+            
+            # Try to parse as JSON (OCPP messages)
+            try:
+                data = json.loads(message)
+                # Example: log StatusNotification messages
+                if isinstance(data, list) and len(data) >= 4:
+                    msg_type = data[0]  # Message type
+                    if msg_type == 2:  # StatusNotification
+                        connector_id = data[3].get('connectorId')
+                        status = data[3].get('status')
+                        await log_event(client_id, connector_id, status)
+            except json.JSONDecodeError:
+                pass
+            
+            # Echo back acknowledgment
+            await websocket.send(f"ACK: {message[:50]}")
+    
+    except websockets.exceptions.ConnectionClosed:
+        logger.info(f"📡 Client disconnected: {client_id}")
+    except Exception as e:
+        logger.error(f"❌ Error handling client {client_id}: {e}")
 
-async def init():
-    global pool
-    pool = await asyncpg.create_pool(DSN, min_size=5, max_size=20)
-    logger.info("Database pool initialized")
+async def run_server():
+    """Start the OCPP WebSocket server"""
+    server = await websockets.serve(main, "0.0.0.0", 8765, subprotocols=['ocpp1.6'])
+    logger.info("🚀 OCPP server started on ws://0.0.0.0:8765")
+    return server
 
-async def shutdown():
+async def shutdown_db():
+    """Close database connection pool"""
     global pool
     if pool:
         await pool.close()
-    logger.info("Database pool closed")
-
-async def run_server():
-    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ssl_context.load_cert_chain(
-        os.getenv("SSL_CERT_PATH", "/etc/ssl/certs/cert.pem"),
-        os.getenv("SSL_KEY_PATH", "/etc/ssl/private/key.pem")
-    )
-    
-    server = await websockets.serve(main, "0.0.0.0", 443, ssl=ssl_context, subprotocols=['ocpp1.6'])
-    logger.info("OCPP server started on wss://0.0.0.0:443")
-    return server
+        logger.info("🛑 Database pool closed")
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(init())
-    loop.run_until_complete(run_server())
+    async def main_async():
+        await init_db()
+        await run_server()
+        try:
+            await asyncio.sleep(float('inf'))
+        except KeyboardInterrupt:
+            logger.info("Shutting down...")
+        finally:
+            await shutdown_db()
     
-    try:
-        loop.run_forever()
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-    finally:
-        loop.run_until_complete(shutdown())
+    asyncio.run(main_async())

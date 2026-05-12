@@ -1,0 +1,3 @@
+DATABASE_URL=postgresql://postgres:fpgqW1BGKVZmVUeo@db.krhbtnqpjsyxlgdmvohj.supabase.co:5432/postgres?sslmode=require
+SENDGRID_API_KEY=SG.dummy_key_for_now
+LOG_LEVEL=INFO
