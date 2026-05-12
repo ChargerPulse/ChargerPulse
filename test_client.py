@@ -3,7 +3,7 @@ import websockets
 import json
 
 async def test():
-    uri = "ws://localhost:8765/TestCharger123"
+    uri = "wss://chargerpulse-1.onrender.com/TestCharger123"
     async with websockets.connect(uri, subprotocols=['ocpp1.6']) as websocket:
         print("✅ Connected!")
         
