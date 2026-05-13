@@ -23,6 +23,19 @@ async def init_db():
         logger.error(f"❌ Database connection failed: {e}")
         pool = None
 
+async def register_charger(cp_id):
+    if not pool:
+        return
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO chargers (id, nickname) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING",
+                cp_id, cp_id
+            )
+        logger.info(f"✅ Charger registered: {cp_id}")
+    except Exception as e:
+        logger.error(f"❌ Failed to register charger: {e}")
+
 async def log_event(cp_id, connector_id, status):
     logger.info(f"🔍 log_event called: cp_id={cp_id}, connector_id={connector_id}, status={status}")
     if not pool:
@@ -41,6 +54,7 @@ async def log_event(cp_id, connector_id, status):
 async def handle_connection(websocket, path):
     client_id = path.split('/')[-1]
     logger.info(f"📡 Client connected: {client_id}")
+    await register_charger(client_id)
     try:
         async for message in websocket:
             logger.info(f"[{client_id}] Received: {message}")
