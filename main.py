@@ -36,6 +36,42 @@ async def register_charger(cp_id):
     except Exception as e:
         logger.error(f"❌ Failed to register charger: {e}")
 
+async def check_and_create_alert(cp_id, status):
+    if not pool:
+        return
+    try:
+        async with pool.acquire() as conn:
+            # Get charger nickname
+            charger = await conn.fetchrow(
+                "SELECT nickname FROM chargers WHERE id = $1", cp_id
+            )
+            nickname = charger['nickname'] if charger else cp_id
+
+            if status in ('Faulted', 'Unavailable', 'Offline'):
+                # Check if alert already exists
+                existing = await conn.fetchrow(
+                    "SELECT id FROM alerts WHERE cp_id = $1 AND resolved = false",
+                    cp_id
+                )
+                if not existing:
+                    await conn.execute(
+                        "INSERT INTO alerts (cp_id, nickname) VALUES ($1, $2)",
+                        cp_id, nickname
+                    )
+                    logger.info(f"🚨 Alert created for {cp_id} — status: {status}")
+            elif status == 'Available':
+                # Auto-resolve alert when charger comes back
+                result = await conn.execute(
+                    """UPDATE alerts 
+                    SET resolved = true, resolved_at = now() 
+                    WHERE cp_id = $1 AND resolved = false""",
+                    cp_id
+                )
+                if result != "UPDATE 0":
+                    logger.info(f"✅ Alert resolved for {cp_id} — back online")
+    except Exception as e:
+        logger.error(f"❌ Alert check failed: {e}")
+
 async def log_event(cp_id, connector_id, status):
     logger.info(f"🔍 log_event called: cp_id={cp_id}, connector_id={connector_id}, status={status}")
     if not pool:
@@ -48,6 +84,7 @@ async def log_event(cp_id, connector_id, status):
                 cp_id, connector_id, status
             )
         logger.info(f"✅ Logged: {cp_id} (connector {connector_id}) = {status}")
+        await check_and_create_alert(cp_id, status)
     except Exception as e:
         logger.error(f"❌ Failed to log event: {e}")
 
@@ -70,6 +107,7 @@ async def handle_connection(websocket, path):
             await websocket.send(f"ACK: {message[:50]}")
     except websockets.exceptions.ConnectionClosed:
         logger.info(f"📡 Client disconnected: {client_id}")
+        await check_and_create_alert(client_id, 'Offline')
     except Exception as e:
         logger.error(f"❌ Error: {e}")
 
