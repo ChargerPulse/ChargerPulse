@@ -25,21 +25,9 @@ async def init_db():
         logger.error(f"❌ Database connection failed: {e}")
         pool = None
 
-async def log_event(cp_id, connector_id, status):
-    """Log a charger status event to the database"""
-    logger.info(f"🔍 log_event called: cp_id={cp_id}, connector_id={connector_id}, status={status}")
-    
-    if not pool:
-        logger.warning("❌ Database pool not available, skipping log")
-        return
-    
-    try:
-        async with pool.acquire() as conn:
-                        await conn.execute(
-                r"""
-                INSERT INTO events (cp_id, connector_id, status)
-                VALUES (\$1, \$2, \$3)
-                """,
+async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO events (cp_id, connector_id, status) VALUES ($1, $2, $3)",
                 cp_id, connector_id, status
             )
         logger.info(f"✅ Logged: {cp_id} (connector {connector_id}) = {status}")
